@@ -1,145 +1,94 @@
+import java.io.*;
+import java.nio.file.*;
 import java.util.*;
 
 public class week1week2 {
 
-    static class DNSEntry {
-        String domain;
-        String ipAddress;
-        long timestamp;
-        long expiryTime;
+    static class Document {
+        String id;
+        List<String> words;
+        Set<String> ngrams;
 
-        DNSEntry(String domain, String ipAddress, int ttl) {
-            this.domain = domain;
-            this.ipAddress = ipAddress;
-            this.timestamp = System.currentTimeMillis();
-            this.expiryTime = this.timestamp + (ttl * 1000);
-        }
-
-        boolean isExpired() {
-            return System.currentTimeMillis() > expiryTime;
+        Document(String id, List<String> words) {
+            this.id = id;
+            this.words = words;
+            this.ngrams = new HashSet<>();
         }
     }
 
-    private final int capacity;
+    private Map<String, Set<String>> ngramIndex; // ngram -> set of document IDs
+    private Map<String, Document> documents;     // document ID -> Document
+    private int nGramSize;
 
-    private LinkedHashMap<String, DNSEntry> cache;
-
-    private int hits = 0;
-    private int misses = 0;
-    private long totalLookupTime = 0;
-    private int totalRequests = 0;
-
-    public week1week2(int capacity) {
-        this.capacity = capacity;
-
-        cache = new LinkedHashMap<String, DNSEntry>(capacity, 0.75f, true) {
-            protected boolean removeEldestEntry(Map.Entry<String, DNSEntry> eldest) {
-                return size() > week1week2.this.capacity;
-            }
-        };
-
-        startCleanupThread();
+    public week1week2(int nGramSize) {
+        this.ngramIndex = new HashMap<>();
+        this.documents = new HashMap<>();
+        this.nGramSize = nGramSize;
     }
 
-    public synchronized String resolve(String domain) {
+    // Load document and index its n-grams
+    public void addDocument(String docId, String content) {
+        List<String> words = Arrays.asList(content.split("\\s+"));
+        Document doc = new Document(docId, words);
 
-        long start = System.nanoTime();
+        for (int i = 0; i <= words.size() - nGramSize; i++) {
+            List<String> ngramWords = words.subList(i, i + nGramSize);
+            String ngram = String.join(" ", ngramWords);
+            doc.ngrams.add(ngram);
 
-        if (cache.containsKey(domain)) {
-
-            DNSEntry entry = cache.get(domain);
-
-            if (!entry.isExpired()) {
-                hits++;
-                totalRequests++;
-                totalLookupTime += (System.nanoTime() - start);
-                System.out.println("Cache HIT → " + entry.ipAddress);
-                return entry.ipAddress;
-            } else {
-                cache.remove(domain);
-                System.out.println("Cache EXPIRED → Query upstream");
-            }
+            ngramIndex.computeIfAbsent(ngram, k -> new HashSet<>()).add(docId);
         }
 
-        misses++;
-
-        String ip = queryUpstreamDNS(domain);
-
-        int ttl = 300;
-
-        DNSEntry newEntry = new DNSEntry(domain, ip, ttl);
-        cache.put(domain, newEntry);
-
-        totalRequests++;
-        totalLookupTime += (System.nanoTime() - start);
-
-        System.out.println("Cache MISS → " + ip + " (TTL: " + ttl + "s)");
-
-        return ip;
+        documents.put(docId, doc);
+        System.out.println("Indexed " + doc.ngrams.size() + " n-grams for " + docId);
     }
 
-    private String queryUpstreamDNS(String domain) {
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-        }
+    // Analyze a new document for plagiarism
+    public void analyzeDocument(String docId, String content) {
+        List<String> words = Arrays.asList(content.split("\\s+"));
+        Document newDoc = new Document(docId, words);
 
-        Random rand = new Random();
-        return "172.217.14." + rand.nextInt(255);
-    }
+        Set<String> matchedDocs = new HashSet<>();
+        Map<String, Integer> matchCounts = new HashMap<>();
 
-    private void startCleanupThread() {
+        for (int i = 0; i <= words.size() - nGramSize; i++) {
+            String ngram = String.join(" ", words.subList(i, i + nGramSize));
 
-        Thread cleaner = new Thread(() -> {
-            while (true) {
-                try {
-                    Thread.sleep(5000);
-
-                    synchronized (week1week2.this) {
-
-                        Iterator<Map.Entry<String, DNSEntry>> it = cache.entrySet().iterator();
-
-                        while (it.hasNext()) {
-                            Map.Entry<String, DNSEntry> entry = it.next();
-
-                            if (entry.getValue().isExpired()) {
-                                it.remove();
-                            }
-                        }
-                    }
-
-                } catch (InterruptedException e) {
-                    break;
+            if (ngramIndex.containsKey(ngram)) {
+                Set<String> docIds = ngramIndex.get(ngram);
+                for (String otherDocId : docIds) {
+                    matchCounts.put(otherDocId, matchCounts.getOrDefault(otherDocId, 0) + 1);
+                    matchedDocs.add(otherDocId);
                 }
             }
-        });
+        }
 
-        cleaner.setDaemon(true);
-        cleaner.start();
+        System.out.println("Extracted " + (words.size() - nGramSize + 1) + " n-grams from " + docId);
+
+        for (String otherDocId : matchedDocs) {
+            int matches = matchCounts.get(otherDocId);
+            int total = documents.get(otherDocId).ngrams.size();
+            double similarity = (matches * 100.0) / total;
+
+            String status = similarity > 50 ? "PLAGIARISM DETECTED" :
+                    (similarity > 10 ? "suspicious" : "low");
+
+            System.out.printf("→ Found %d matching n-grams with \"%s\"\n", matches, otherDocId);
+            System.out.printf("→ Similarity: %.1f%% (%s)\n", similarity, status);
+        }
     }
 
-    public void getCacheStats() {
+    public static void main(String[] args) throws IOException {
 
-        double hitRate = (totalRequests == 0) ? 0 : ((double) hits / totalRequests) * 100;
-        double avgLookup = (totalRequests == 0) ? 0 : (totalLookupTime / totalRequests) / 1_000_000.0;
+        week1week2 detector = new week1week2(5); // 5-grams
 
-        System.out.println("Cache Stats:");
-        System.out.println("Hit Rate: " + String.format("%.2f", hitRate) + "%");
-        System.out.println("Average Lookup Time: " + String.format("%.3f", avgLookup) + " ms");
-    }
+        // Simulate loading previous documents
+        detector.addDocument("essay_089.txt", "This is a sample essay about Java programming and data structures.");
+        detector.addDocument("essay_092.txt", "Data structures and algorithms are essential for coding interviews and Java programming.");
+        detector.addDocument("essay_101.txt", "Machine learning and AI are rapidly growing fields in computer science.");
 
-    public static void main(String[] args) throws Exception {
-
-        week1week2 dnsCache = new week1week2(5);
-
-        dnsCache.resolve("google.com");
-        dnsCache.resolve("google.com");
-
-        dnsCache.resolve("facebook.com");
-        dnsCache.resolve("youtube.com");
-
-        dnsCache.resolve("google.com");
-
-        dnsCache.getCacheStats();
+        // Analyze a new document
+        String newEssay = "Java programming and data structures are essential for coding interviews and algorithms.";
+        detector.analyzeDocument("essay_123.txt", newEssay);
     }
 }
