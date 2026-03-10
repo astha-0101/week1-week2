@@ -1,81 +1,145 @@
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
-
-class FlashSaleInventoryManager {
-
-    // HashMap for product stock
-    private ConcurrentHashMap<String, AtomicInteger> inventory = new ConcurrentHashMap<>();
-
-    // Waiting list FIFO
-    private ConcurrentHashMap<String, LinkedHashMap<Integer, Integer>> waitingList = new ConcurrentHashMap<>();
-
-    // Add product with stock
-    public void addProduct(String productId, int stock) {
-        inventory.put(productId, new AtomicInteger(stock));
-        waitingList.put(productId, new LinkedHashMap<>());
-    }
-
-    // Instant stock check
-    public int checkStock(String productId) {
-        if (!inventory.containsKey(productId)) {
-            return -1;
-        }
-        return inventory.get(productId).get();
-    }
-
-    // Purchase item
-    public synchronized String purchaseItem(String productId, int userId) {
-
-        if (!inventory.containsKey(productId)) {
-            return "Product not found";
-        }
-
-        AtomicInteger stock = inventory.get(productId);
-
-        // If stock available
-        if (stock.get() > 0) {
-            int remaining = stock.decrementAndGet();
-            return "Success, " + remaining + " units remaining";
-        }
-
-        // Stock finished → add to waiting list
-        LinkedHashMap<Integer, Integer> queue = waitingList.get(productId);
-
-        queue.put(userId, queue.size() + 1);
-
-        return "Added to waiting list, position #" + queue.size();
-    }
-
-    // Show waiting list
-    public void showWaitingList(String productId) {
-        LinkedHashMap<Integer, Integer> queue = waitingList.get(productId);
-
-        for (Map.Entry<Integer, Integer> entry : queue.entrySet()) {
-            System.out.println("User " + entry.getKey() + " -> Position " + entry.getValue());
-        }
-    }
-}
 
 public class week1week2 {
 
-    public static void main(String[] args) {
+    static class DNSEntry {
+        String domain;
+        String ipAddress;
+        long timestamp;
+        long expiryTime;
 
-        FlashSaleInventoryManager manager = new FlashSaleInventoryManager();
-
-        manager.addProduct("IPHONE15_256GB", 100);
-
-        // Check stock
-        System.out.println("Stock Available: " + manager.checkStock("IPHONE15_256GB"));
-
-        // Simulate purchases
-        for (int i = 1; i <= 105; i++) {
-            String result = manager.purchaseItem("IPHONE15_256GB", i);
-            System.out.println("User " + i + " -> " + result);
+        DNSEntry(String domain, String ipAddress, int ttl) {
+            this.domain = domain;
+            this.ipAddress = ipAddress;
+            this.timestamp = System.currentTimeMillis();
+            this.expiryTime = this.timestamp + (ttl * 1000);
         }
 
-        // Show waiting list
-        System.out.println("\nWaiting List:");
-        manager.showWaitingList("IPHONE15_256GB");
+        boolean isExpired() {
+            return System.currentTimeMillis() > expiryTime;
+        }
+    }
+
+    private final int capacity;
+
+    private LinkedHashMap<String, DNSEntry> cache;
+
+    private int hits = 0;
+    private int misses = 0;
+    private long totalLookupTime = 0;
+    private int totalRequests = 0;
+
+    public week1week2(int capacity) {
+        this.capacity = capacity;
+
+        cache = new LinkedHashMap<String, DNSEntry>(capacity, 0.75f, true) {
+            protected boolean removeEldestEntry(Map.Entry<String, DNSEntry> eldest) {
+                return size() > week1week2.this.capacity;
+            }
+        };
+
+        startCleanupThread();
+    }
+
+    public synchronized String resolve(String domain) {
+
+        long start = System.nanoTime();
+
+        if (cache.containsKey(domain)) {
+
+            DNSEntry entry = cache.get(domain);
+
+            if (!entry.isExpired()) {
+                hits++;
+                totalRequests++;
+                totalLookupTime += (System.nanoTime() - start);
+                System.out.println("Cache HIT → " + entry.ipAddress);
+                return entry.ipAddress;
+            } else {
+                cache.remove(domain);
+                System.out.println("Cache EXPIRED → Query upstream");
+            }
+        }
+
+        misses++;
+
+        String ip = queryUpstreamDNS(domain);
+
+        int ttl = 300;
+
+        DNSEntry newEntry = new DNSEntry(domain, ip, ttl);
+        cache.put(domain, newEntry);
+
+        totalRequests++;
+        totalLookupTime += (System.nanoTime() - start);
+
+        System.out.println("Cache MISS → " + ip + " (TTL: " + ttl + "s)");
+
+        return ip;
+    }
+
+    private String queryUpstreamDNS(String domain) {
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+        }
+
+        Random rand = new Random();
+        return "172.217.14." + rand.nextInt(255);
+    }
+
+    private void startCleanupThread() {
+
+        Thread cleaner = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(5000);
+
+                    synchronized (week1week2.this) {
+
+                        Iterator<Map.Entry<String, DNSEntry>> it = cache.entrySet().iterator();
+
+                        while (it.hasNext()) {
+                            Map.Entry<String, DNSEntry> entry = it.next();
+
+                            if (entry.getValue().isExpired()) {
+                                it.remove();
+                            }
+                        }
+                    }
+
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        });
+
+        cleaner.setDaemon(true);
+        cleaner.start();
+    }
+
+    public void getCacheStats() {
+
+        double hitRate = (totalRequests == 0) ? 0 : ((double) hits / totalRequests) * 100;
+        double avgLookup = (totalRequests == 0) ? 0 : (totalLookupTime / totalRequests) / 1_000_000.0;
+
+        System.out.println("Cache Stats:");
+        System.out.println("Hit Rate: " + String.format("%.2f", hitRate) + "%");
+        System.out.println("Average Lookup Time: " + String.format("%.3f", avgLookup) + " ms");
+    }
+
+    public static void main(String[] args) throws Exception {
+
+        week1week2 dnsCache = new week1week2(5);
+
+        dnsCache.resolve("google.com");
+        dnsCache.resolve("google.com");
+
+        dnsCache.resolve("facebook.com");
+        dnsCache.resolve("youtube.com");
+
+        dnsCache.resolve("google.com");
+
+        dnsCache.getCacheStats();
     }
 }
