@@ -1,106 +1,136 @@
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 
 public class week1week2 {
 
-    static class TokenBucket {
-        private final int maxTokens;
-        private final double refillRatePerMs; // tokens per ms
-        private double tokens;
-        private long lastRefillTime;
+    static class TrieNode {
+        Map<Character, TrieNode> children = new HashMap<>();
+        boolean isEnd;
+        String query;
+        int frequency;
+    }
 
-        public TokenBucket(int maxTokens, int refillPerHour) {
-            this.maxTokens = maxTokens;
-            this.tokens = maxTokens;
-            this.refillRatePerMs = refillPerHour / 3600000.0; // per ms
-            this.lastRefillTime = System.currentTimeMillis();
+    private TrieNode root;
+    private final int TOP_K = 10;
+
+    public week1week2() {
+        root = new TrieNode();
+    }
+
+    // Insert a query with frequency
+    public void insertQuery(String query, int frequency) {
+        TrieNode node = root;
+        for (char c : query.toCharArray()) {
+            node = node.children.computeIfAbsent(c, k -> new TrieNode());
+        }
+        node.isEnd = true;
+        node.query = query;
+        node.frequency += frequency; // accumulate frequency
+    }
+
+    // Update frequency when user searches a query
+    public void updateFrequency(String query) {
+        insertQuery(query, 1);
+    }
+
+    // Autocomplete top K suggestions for a given prefix
+    public List<String> autocomplete(String prefix) {
+        TrieNode node = root;
+        for (char c : prefix.toCharArray()) {
+            node = node.children.get(c);
+            if (node == null) return Collections.emptyList();
         }
 
-        public synchronized boolean allowRequest() {
-            refill();
-            if (tokens >= 1) {
-                tokens -= 1;
-                return true;
-            } else {
-                return false;
+        PriorityQueue<TrieNode> minHeap = new PriorityQueue<>(TOP_K, Comparator.comparingInt(n -> n.frequency));
+        dfs(node, minHeap);
+
+        List<String> result = new ArrayList<>();
+        while (!minHeap.isEmpty()) result.add(minHeap.poll().query);
+        Collections.reverse(result); // highest frequency first
+        return result;
+    }
+
+    // Depth-first search to collect top K queries
+    private void dfs(TrieNode node, PriorityQueue<TrieNode> heap) {
+        if (node.isEnd) {
+            if (heap.size() < TOP_K) {
+                heap.offer(node);
+            } else if (node.frequency > heap.peek().frequency) {
+                heap.poll();
+                heap.offer(node);
             }
         }
-
-        public synchronized int tokensRemaining() {
-            refill();
-            return (int) tokens;
-        }
-
-        public synchronized long timeUntilResetMs() {
-            refill();
-            if (tokens >= maxTokens) return 0;
-            return (long) ((maxTokens - tokens) / refillRatePerMs);
-        }
-
-        private void refill() {
-            long now = System.currentTimeMillis();
-            long elapsed = now - lastRefillTime;
-            double refillTokens = elapsed * refillRatePerMs;
-            tokens = Math.min(maxTokens, tokens + refillTokens);
-            lastRefillTime = now;
+        for (TrieNode child : node.children.values()) {
+            dfs(child, heap);
         }
     }
 
-    private final ConcurrentHashMap<String, TokenBucket> buckets;
-    private final int maxTokensPerClient;
-    private final int refillPerHour;
-
-    public week1week2(int maxTokensPerClient, int refillPerHour) {
-        this.buckets = new ConcurrentHashMap<>();
-        this.maxTokensPerClient = maxTokensPerClient;
-        this.refillPerHour = refillPerHour;
-    }
-
-    public String checkRateLimit(String clientId) {
-        TokenBucket bucket = buckets.computeIfAbsent(clientId, id -> new TokenBucket(maxTokensPerClient, refillPerHour));
-
-        boolean allowed = bucket.allowRequest();
-        int remaining = bucket.tokensRemaining();
-        long resetMs = bucket.timeUntilResetMs();
-
-        if (allowed) {
-            return "Allowed (" + remaining + " requests remaining)";
-        } else {
-            return "Denied (0 requests remaining, retry after " + (resetMs / 1000) + "s)";
+    // Optional: simple typo correction using edit distance (Levenshtein)
+    public List<String> suggestCorrections(String query, int maxDistance) {
+        List<String> suggestions = new ArrayList<>();
+        for (String candidate : collectAllQueries()) {
+            if (levenshteinDistance(query, candidate) <= maxDistance) {
+                suggestions.add(candidate);
+            }
         }
+        return suggestions;
     }
 
-    public Map<String, Object> getRateLimitStatus(String clientId) {
-        TokenBucket bucket = buckets.computeIfAbsent(clientId, id -> new TokenBucket(maxTokensPerClient, refillPerHour));
-        Map<String, Object> status = new HashMap<>();
-        status.put("used", maxTokensPerClient - bucket.tokensRemaining());
-        status.put("limit", maxTokensPerClient);
-        status.put("reset", (System.currentTimeMillis() + bucket.timeUntilResetMs()) / 1000); // epoch seconds
-        return status;
+    private List<String> collectAllQueries() {
+        List<String> queries = new ArrayList<>();
+        collectQueries(root, queries);
+        return queries;
     }
 
-    public static void main(String[] args) throws InterruptedException {
+    private void collectQueries(TrieNode node, List<String> queries) {
+        if (node.isEnd) queries.add(node.query);
+        for (TrieNode child : node.children.values()) collectQueries(child, queries);
+    }
 
-        week1week2 rateLimiter = new week1week2(1000, 1000); // 1000 requests per hour
+    private int levenshteinDistance(String a, String b) {
+        int[][] dp = new int[a.length() + 1][b.length() + 1];
+        for (int i = 0; i <= a.length(); i++) dp[i][0] = i;
+        for (int j = 0; j <= b.length(); j++) dp[0][j] = j;
 
-        String clientId = "abc123";
+        for (int i = 1; i <= a.length(); i++) {
+            for (int j = 1; j <= b.length(); j++) {
+                if (a.charAt(i - 1) == b.charAt(j - 1)) dp[i][j] = dp[i - 1][j - 1];
+                else dp[i][j] = 1 + Math.min(dp[i - 1][j - 1], Math.min(dp[i - 1][j], dp[i][j - 1]));
+            }
+        }
+        return dp[a.length()][b.length()];
+    }
 
-        // Simulate 3 requests
-        System.out.println(rateLimiter.checkRateLimit(clientId));
-        System.out.println(rateLimiter.checkRateLimit(clientId));
-        System.out.println(rateLimiter.checkRateLimit(clientId));
+    public static void main(String[] args) {
+        week1week2 autocomplete = new week1week2();
 
-        // Show status
-        Map<String, Object> status = rateLimiter.getRateLimitStatus(clientId);
-        System.out.println("Rate Limit Status: " + status);
+        // Load sample queries
+        autocomplete.insertQuery("java tutorial", 1234567);
+        autocomplete.insertQuery("javascript", 987654);
+        autocomplete.insertQuery("java download", 456789);
+        autocomplete.insertQuery("java 21 features", 10);
 
-        // Simulate exceeding limit
-        week1week2 smallLimit = new week1week2(3, 3); // 3 requests per hour
-        String c = "xyz999";
-        System.out.println(smallLimit.checkRateLimit(c));
-        System.out.println(smallLimit.checkRateLimit(c));
-        System.out.println(smallLimit.checkRateLimit(c));
-        System.out.println(smallLimit.checkRateLimit(c)); // should be denied
+        // Autocomplete prefix "jav"
+        System.out.println("Autocomplete for 'jav':");
+        List<String> suggestions = autocomplete.autocomplete("jav");
+        for (int i = 0; i < suggestions.size(); i++) {
+            System.out.println((i + 1) + ". " + suggestions.get(i));
+        }
+
+        // Update frequency for trending query
+        autocomplete.updateFrequency("java 21 features");
+        autocomplete.updateFrequency("java 21 features");
+
+        System.out.println("\nAutocomplete after updating 'java 21 features':");
+        suggestions = autocomplete.autocomplete("jav");
+        for (int i = 0; i < suggestions.size(); i++) {
+            System.out.println((i + 1) + ". " + suggestions.get(i));
+        }
+
+        // Typo correction example
+        System.out.println("\nSuggestions for typo 'javascritp':");
+        List<String> corrections = autocomplete.suggestCorrections("javascritp", 2);
+        for (String s : corrections) {
+            System.out.println(s);
+        }
     }
 }
