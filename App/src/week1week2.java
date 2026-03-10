@@ -1,94 +1,106 @@
-import java.io.*;
-import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 
 public class week1week2 {
 
-    static class Document {
-        String id;
-        List<String> words;
-        Set<String> ngrams;
+    static class TokenBucket {
+        private final int maxTokens;
+        private final double refillRatePerMs; // tokens per ms
+        private double tokens;
+        private long lastRefillTime;
 
-        Document(String id, List<String> words) {
-            this.id = id;
-            this.words = words;
-            this.ngrams = new HashSet<>();
-        }
-    }
-
-    private Map<String, Set<String>> ngramIndex; // ngram -> set of document IDs
-    private Map<String, Document> documents;     // document ID -> Document
-    private int nGramSize;
-
-    public week1week2(int nGramSize) {
-        this.ngramIndex = new HashMap<>();
-        this.documents = new HashMap<>();
-        this.nGramSize = nGramSize;
-    }
-
-    // Load document and index its n-grams
-    public void addDocument(String docId, String content) {
-        List<String> words = Arrays.asList(content.split("\\s+"));
-        Document doc = new Document(docId, words);
-
-        for (int i = 0; i <= words.size() - nGramSize; i++) {
-            List<String> ngramWords = words.subList(i, i + nGramSize);
-            String ngram = String.join(" ", ngramWords);
-            doc.ngrams.add(ngram);
-
-            ngramIndex.computeIfAbsent(ngram, k -> new HashSet<>()).add(docId);
+        public TokenBucket(int maxTokens, int refillPerHour) {
+            this.maxTokens = maxTokens;
+            this.tokens = maxTokens;
+            this.refillRatePerMs = refillPerHour / 3600000.0; // per ms
+            this.lastRefillTime = System.currentTimeMillis();
         }
 
-        documents.put(docId, doc);
-        System.out.println("Indexed " + doc.ngrams.size() + " n-grams for " + docId);
-    }
-
-    // Analyze a new document for plagiarism
-    public void analyzeDocument(String docId, String content) {
-        List<String> words = Arrays.asList(content.split("\\s+"));
-        Document newDoc = new Document(docId, words);
-
-        Set<String> matchedDocs = new HashSet<>();
-        Map<String, Integer> matchCounts = new HashMap<>();
-
-        for (int i = 0; i <= words.size() - nGramSize; i++) {
-            String ngram = String.join(" ", words.subList(i, i + nGramSize));
-
-            if (ngramIndex.containsKey(ngram)) {
-                Set<String> docIds = ngramIndex.get(ngram);
-                for (String otherDocId : docIds) {
-                    matchCounts.put(otherDocId, matchCounts.getOrDefault(otherDocId, 0) + 1);
-                    matchedDocs.add(otherDocId);
-                }
+        public synchronized boolean allowRequest() {
+            refill();
+            if (tokens >= 1) {
+                tokens -= 1;
+                return true;
+            } else {
+                return false;
             }
         }
 
-        System.out.println("Extracted " + (words.size() - nGramSize + 1) + " n-grams from " + docId);
+        public synchronized int tokensRemaining() {
+            refill();
+            return (int) tokens;
+        }
 
-        for (String otherDocId : matchedDocs) {
-            int matches = matchCounts.get(otherDocId);
-            int total = documents.get(otherDocId).ngrams.size();
-            double similarity = (matches * 100.0) / total;
+        public synchronized long timeUntilResetMs() {
+            refill();
+            if (tokens >= maxTokens) return 0;
+            return (long) ((maxTokens - tokens) / refillRatePerMs);
+        }
 
-            String status = similarity > 50 ? "PLAGIARISM DETECTED" :
-                    (similarity > 10 ? "suspicious" : "low");
-
-            System.out.printf("→ Found %d matching n-grams with \"%s\"\n", matches, otherDocId);
-            System.out.printf("→ Similarity: %.1f%% (%s)\n", similarity, status);
+        private void refill() {
+            long now = System.currentTimeMillis();
+            long elapsed = now - lastRefillTime;
+            double refillTokens = elapsed * refillRatePerMs;
+            tokens = Math.min(maxTokens, tokens + refillTokens);
+            lastRefillTime = now;
         }
     }
 
-    public static void main(String[] args) throws IOException {
+    private final ConcurrentHashMap<String, TokenBucket> buckets;
+    private final int maxTokensPerClient;
+    private final int refillPerHour;
 
-        week1week2 detector = new week1week2(5); // 5-grams
+    public week1week2(int maxTokensPerClient, int refillPerHour) {
+        this.buckets = new ConcurrentHashMap<>();
+        this.maxTokensPerClient = maxTokensPerClient;
+        this.refillPerHour = refillPerHour;
+    }
 
-        // Simulate loading previous documents
-        detector.addDocument("essay_089.txt", "This is a sample essay about Java programming and data structures.");
-        detector.addDocument("essay_092.txt", "Data structures and algorithms are essential for coding interviews and Java programming.");
-        detector.addDocument("essay_101.txt", "Machine learning and AI are rapidly growing fields in computer science.");
+    public String checkRateLimit(String clientId) {
+        TokenBucket bucket = buckets.computeIfAbsent(clientId, id -> new TokenBucket(maxTokensPerClient, refillPerHour));
 
-        // Analyze a new document
-        String newEssay = "Java programming and data structures are essential for coding interviews and algorithms.";
-        detector.analyzeDocument("essay_123.txt", newEssay);
+        boolean allowed = bucket.allowRequest();
+        int remaining = bucket.tokensRemaining();
+        long resetMs = bucket.timeUntilResetMs();
+
+        if (allowed) {
+            return "Allowed (" + remaining + " requests remaining)";
+        } else {
+            return "Denied (0 requests remaining, retry after " + (resetMs / 1000) + "s)";
+        }
+    }
+
+    public Map<String, Object> getRateLimitStatus(String clientId) {
+        TokenBucket bucket = buckets.computeIfAbsent(clientId, id -> new TokenBucket(maxTokensPerClient, refillPerHour));
+        Map<String, Object> status = new HashMap<>();
+        status.put("used", maxTokensPerClient - bucket.tokensRemaining());
+        status.put("limit", maxTokensPerClient);
+        status.put("reset", (System.currentTimeMillis() + bucket.timeUntilResetMs()) / 1000); // epoch seconds
+        return status;
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+
+        week1week2 rateLimiter = new week1week2(1000, 1000); // 1000 requests per hour
+
+        String clientId = "abc123";
+
+        // Simulate 3 requests
+        System.out.println(rateLimiter.checkRateLimit(clientId));
+        System.out.println(rateLimiter.checkRateLimit(clientId));
+        System.out.println(rateLimiter.checkRateLimit(clientId));
+
+        // Show status
+        Map<String, Object> status = rateLimiter.getRateLimitStatus(clientId);
+        System.out.println("Rate Limit Status: " + status);
+
+        // Simulate exceeding limit
+        week1week2 smallLimit = new week1week2(3, 3); // 3 requests per hour
+        String c = "xyz999";
+        System.out.println(smallLimit.checkRateLimit(c));
+        System.out.println(smallLimit.checkRateLimit(c));
+        System.out.println(smallLimit.checkRateLimit(c));
+        System.out.println(smallLimit.checkRateLimit(c)); // should be denied
     }
 }
